@@ -142,6 +142,7 @@
 		if (!normalized) return;
 		const now = Date.now();
 		usageState = normalized;
+		persistUsage(normalized, currentOrgId || getOrgIdFromCookie());
 		lastUsageUpdateMs = now;
 		if (source === 'sse') lastUsageSseMs = now;
 		// Cache parsed timestamps to avoid Date.parse() every tick
@@ -153,6 +154,47 @@
 	function updateOrgIdIfNeeded(newOrgId) {
 		if (newOrgId && typeof newOrgId === 'string' && newOrgId !== currentOrgId) {
 			currentOrgId = newOrgId;
+		}
+	}
+
+	// Persist last usage snapshot so bars survive reloads (the /usage endpoint
+	// returns null windows on free plan until the next message streams message_limit).
+	function persistUsage(normalized, orgId) {
+		try {
+			if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+				chrome.storage.local.set({ claude_usage_state: { orgId, usage: normalized } });
+			}
+		} catch {
+			// ignore
+		}
+	}
+
+	function restoreCachedUsage() {
+		return new Promise((resolve) => {
+			try {
+				if (typeof chrome === 'undefined' || !chrome.storage?.local) return resolve();
+				chrome.storage.local.get(['claude_usage_state'], (result) => {
+					const entry = result?.claude_usage_state;
+					const cached = entry?.usage;
+					if (cached && entry.orgId === getOrgIdFromCookie() && (cached.five_hour || cached.seven_day)) {
+						resolve(cached);
+					} else {
+						resolve();
+					}
+				});
+			} catch {
+				resolve();
+			}
+		});
+	}
+
+	function clearPersistedUsage() {
+		try {
+			if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+				chrome.storage.local.remove('claude_usage_state');
+			}
+		} catch {
+			// ignore
 		}
 	}
 
@@ -174,6 +216,24 @@
 		}
 
 		const parsed = parseUsageFromUsageEndpoint(raw);
+
+		// Endpoint reachable but reports no windows. Only clear when nothing is
+		// live (free plan returns nulls even mid-window while SSE data is fresh).
+		if (raw && typeof raw === 'object' && !parsed) {
+			const nowMs = Date.now();
+			const hasLiveWindow =
+				(usageResetMs.five_hour && nowMs < usageResetMs.five_hour) ||
+				(usageResetMs.seven_day && nowMs < usageResetMs.seven_day);
+			if (!hasLiveWindow) {
+				usageState = null;
+				usageResetMs.five_hour = null;
+				usageResetMs.seven_day = null;
+				clearPersistedUsage();
+				ui.setUsage({});
+			}
+			return;
+		}
+
 		applyUsageUpdate(parsed, 'usage');
 	}
 
@@ -219,29 +279,37 @@
 	CC.bridge.on('cc:message_limit', handleMessageLimit);
 
 	async function handleUrlChange() {
+		const { claudeCounterEnabled } = await new Promise((resolve) => {
+			if (typeof chrome === 'undefined' || !chrome.storage?.sync) return resolve({ claudeCounterEnabled: true });
+			chrome.storage.sync.get({ claudeCounterEnabled: true }, resolve);
+		});
+		if (claudeCounterEnabled === false) return;
+
 		currentConversationId = getConversationId();
 
 		// Attach usage line and header independently - they have different anchor elements
-		// and CHAT_MENU_TRIGGER doesn't exist on home/new pages
+		// and the header anchor doesn't exist on home/new pages
 		waitForElement(CC.DOM.MODEL_SELECTOR_DROPDOWN, 60000).then((el) => {
 			if (el) ui.attachUsageLine();
 		});
-		waitForElement(CC.DOM.CHAT_MENU_TRIGGER, 60000).then((el) => {
+		waitForElement(CC.DOM.CHAT_HEADER_ANCHOR, 60000).then((el) => {
 			if (el) ui.attachHeader();
 		});
+
+		// Usage is org-level: restore/refresh on every page, including home/new
+		updateOrgIdIfNeeded(getOrgIdFromCookie());
+		if (!usageState) {
+			const cached = await restoreCachedUsage();
+			if (cached) applyUsageUpdate(cached, 'cache');
+			else await refreshUsage();
+		}
 
 		if (!currentConversationId) {
 			ui.setConversationMetrics();
 			return;
 		}
 
-		// Best-effort orgId from cookie.
-		updateOrgIdIfNeeded(getOrgIdFromCookie());
-
 		await refreshConversation();
-
-		// Usage is org-level, not conversation-level. Only fetch on first load or if stale.
-		if (!usageState) await refreshUsage();
 	}
 
 	const unobserveUrl = observeUrlChanges(handleUrlChange);

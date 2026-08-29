@@ -5,7 +5,9 @@
 
 	CC.DOM = Object.freeze({
 		CHAT_MENU_TRIGGER: '[data-testid="chat-menu-trigger"]',
+		CHAT_HEADER_ANCHOR: '[data-testid="chat-title-split"], [data-testid="chat-menu-trigger"]',
 		MODEL_SELECTOR_DROPDOWN: '[data-testid="model-selector-dropdown"]',
+		COMPOSER: '[data-cds="ChatComposer"]',
 		CHAT_PROJECT_WRAPPER: '.chat-project-wrapper',
 		BRIDGE_SCRIPT_ID: 'cc-bridge-script'
 	});

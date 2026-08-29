@@ -10,24 +10,16 @@
 	}
 
 	function formatResetCountdown(timestampMs) {
-		// <= 0: reset time reached
 		const diffMs = timestampMs - Date.now();
-		if (diffMs <= 0) return '0s';
+		if (diffMs <= 0) return '0m';
 
-		// < 1 min: show seconds
-		const totalSeconds = Math.floor(diffMs / 1000);
-		if (totalSeconds < 60) return `${totalSeconds}s`;
-
-		// < 1 hour: show minutes
-		const totalMinutes = Math.round(totalSeconds / 60);
+		const totalMinutes = Math.round(diffMs / (1000 * 60));
 		if (totalMinutes < 60) return `${totalMinutes}m`;
 
-		// < 1 day: show hours
 		const hours = Math.floor(totalMinutes / 60);
 		const minutes = totalMinutes % 60;
 		if (hours < 24) return `${hours}h ${minutes}m`;
 
-		// >= 1 day: show days
 		const days = Math.floor(hours / 24);
 		const remHours = hours % 24;
 		return `${days}d ${remHours}h`;
@@ -125,6 +117,10 @@
 			this.weeklyWindowStartMs = null;
 			this.refreshingUsage = false;
 
+			this.sessionTooltip = null;
+			this.sessionHistory = [];
+			this.sessionResetKey = null;
+
 			this.domObserver = null;
 		}
 
@@ -207,7 +203,7 @@
 
 				if (headerMissing && !headerReattachPending) {
 					headerReattachPending = true;
-					CC.waitForElement(CC.DOM.CHAT_MENU_TRIGGER, 60000).then((el) => {
+					CC.waitForElement(CC.DOM.CHAT_HEADER_ANCHOR, 60000).then((el) => {
 						headerReattachPending = false;
 						if (el) this.attachHeader();
 					});
@@ -219,10 +215,11 @@
 		_initUsageLine() {
 			this.usageLine = document.createElement('div');
 			this.usageLine.className =
-				'text-text-400 text-[11px] cc-usageRow cc-hidden flex flex-row items-center gap-3 w-full';
+				'text-text-400 text-[11px] cc-usageRow flex flex-row items-center gap-3 w-full';
 
 			this.sessionUsageSpan = document.createElement('span');
 			this.sessionUsageSpan.className = 'cc-usageText';
+			this.sessionUsageSpan.textContent = 'Session: 0%';
 
 			this.sessionBar = document.createElement('div');
 			this.sessionBar.className = 'cc-bar cc-bar--usage';
@@ -236,6 +233,7 @@
 
 			this.weeklyUsageSpan = document.createElement('span');
 			this.weeklyUsageSpan.className = 'cc-usageText';
+			this.weeklyUsageSpan.textContent = 'Weekly: 0%';
 
 			this.weeklyBar = document.createElement('div');
 			this.weeklyBar.className = 'cc-bar cc-bar--usage';
@@ -291,9 +289,12 @@
 				{ topOffset: 8 }
 			);
 
+			this.sessionTooltip = makeTooltip(
+				"5-hour session window.\nThe bar shows your usage.\nThe line marks where you are in the window."
+			);
 			setupTooltip(
 				this.sessionGroup,
-				makeTooltip("5-hour session window.\nThe bar shows your usage.\nThe line marks where you are in the window."),
+				this.sessionTooltip,
 				{ topOffset: 8 }
 			);
 
@@ -311,9 +312,13 @@
 		}
 
 		attachHeader() {
-			const chatMenu = document.querySelector(CC.DOM.CHAT_MENU_TRIGGER);
-			if (!chatMenu) return;
-			const anchor = chatMenu.closest(CC.DOM.CHAT_PROJECT_WRAPPER) || chatMenu.parentElement;
+			const trigger = document.querySelector(CC.DOM.CHAT_HEADER_ANCHOR);
+			if (!trigger) return;
+			// New dframe header anchors on chat-title-split; legacy header on chat-menu-trigger
+			const anchor =
+				trigger.getAttribute('data-testid') === 'chat-title-split'
+					? trigger
+					: trigger.closest(CC.DOM.CHAT_PROJECT_WRAPPER) || trigger.parentElement;
 			if (!anchor) return;
 			if (anchor.nextElementSibling !== this.headerContainer) {
 				anchor.after(this.headerContainer);
@@ -326,6 +331,21 @@
 			if (!this.usageLine) return;
 			const modelSelector = document.querySelector(CC.DOM.MODEL_SELECTOR_DROPDOWN);
 			if (!modelSelector) return;
+
+			// New composer: render the row inside the rounded composer box itself
+			// (its first child), not the page-bg chin strip below it
+			const composer =
+				modelSelector.closest(CC.DOM.COMPOSER) ||
+				document.querySelector(CC.DOM.COMPOSER);
+			if (composer) {
+				const box = composer.querySelector(':scope > .bg-surface-3') || composer.firstElementChild;
+				if (box && box.lastElementChild !== this.usageLine) {
+					box.appendChild(this.usageLine);
+				}
+				this.refreshProgressChrome();
+				return;
+			}
+
 			const gridContainer = modelSelector.closest('[data-testid="chat-input-grid-container"]');
 			const gridArea = modelSelector.closest('[data-testid="chat-input-grid-area"]');
 			const findToolbarRow = (el, stopAt) => {
@@ -452,13 +472,86 @@
 			this.headerContainer.appendChild(this.headerDisplay);
 		}
 
+		_updateSessionTooltip() {
+			if (!this.sessionTooltip) return;
+			const baseText = "5-hour session window.\nThe bar shows your usage.\nThe line marks where you are in the window.";
+			if (this.sessionHistory && this.sessionHistory.length > 0) {
+				const historyLine = this.sessionHistory
+					.map((v) => (v === 0 ? '0' : `${v}%`))
+					.join(' -> ');
+				this.sessionTooltip.textContent = `${historyLine}\n${baseText}`;
+			} else {
+				this.sessionTooltip.textContent = baseText;
+			}
+		}
+
+		_updateSessionHistory(resetsAt, currentPct) {
+			if (!resetsAt) {
+				this.sessionHistory = [];
+				this.sessionResetKey = null;
+				this._updateSessionTooltip();
+				return;
+			}
+
+			const processHistory = (storedResetsAt, storedHistory) => {
+				let history = [];
+				if (storedResetsAt === resetsAt && Array.isArray(storedHistory) && storedHistory.length > 0) {
+					history = [...storedHistory];
+				} else {
+					history = currentPct > 0 ? [0, currentPct] : [0];
+				}
+
+				const lastVal = history[history.length - 1];
+				if (currentPct > lastVal) {
+					history.push(currentPct);
+					if (history.length > 5) {
+						history = history.slice(-5);
+					}
+				} else if (currentPct < lastVal) {
+					history = currentPct > 0 ? [0, currentPct] : [0];
+				}
+
+				this.sessionHistory = history;
+				this.sessionResetKey = resetsAt;
+				this._updateSessionTooltip();
+
+				try {
+					if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+						chrome.storage.local.set({
+							claude_session_history: { resets_at: resetsAt, history }
+						});
+					}
+				} catch (e) {
+					// ignore storage errors
+				}
+			};
+
+			if (this.sessionResetKey !== resetsAt) {
+				this.sessionResetKey = resetsAt;
+				try {
+					if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+						chrome.storage.local.get(['claude_session_history'], (result) => {
+							const data = result?.claude_session_history;
+							processHistory(data?.resets_at, data?.history);
+						});
+					} else {
+						processHistory(null, null);
+					}
+				} catch (e) {
+					processHistory(null, null);
+				}
+			} else {
+				processHistory(resetsAt, this.sessionHistory);
+			}
+		}
+
 		setUsage(usage) {
 			this.refreshProgressChrome();
 			const session = usage?.five_hour || null;
 			const weekly = usage?.seven_day || null;
-			const hasAnyUsage =
-				!!(session && typeof session.utilization === 'number') || !!(weekly && typeof weekly.utilization === 'number');
-			this.usageLine?.classList.toggle('cc-hidden', !hasAnyUsage);
+
+			// Bars are permanent; unknown/expired usage renders as 0%
+			this.usageLine?.classList.remove('cc-hidden');
 
 			if (session && typeof session.utilization === 'number') {
 				const rawPct = session.utilization;
@@ -472,22 +565,24 @@
 				this.sessionBarFill.style.width = `${width}%`;
 				this.sessionBarFill.classList.toggle('cc-warn', width >= 90);
 				this.sessionBarFill.classList.toggle('cc-full', width >= 99.5);
+
+				this._updateSessionHistory(session.resets_at, pct);
 			} else {
-				this.sessionUsageSpan.textContent = '';
+				this.sessionUsageSpan.textContent = 'Session: 0%';
 				this.sessionBarFill.style.width = '0%';
 				this.sessionBarFill.classList.remove('cc-warn', 'cc-full');
 				this.sessionResetMs = null;
 				this.sessionWindowStartMs = null;
+				this._updateSessionHistory(null, 0);
 			}
 
 			const hasWeekly = weekly && typeof weekly.utilization === 'number';
-			this.weeklyGroup?.classList.toggle('cc-hidden', !hasWeekly);
-			this.sessionGroup?.classList.toggle('cc-usageGroup--single', !hasWeekly);
+			this.weeklyGroup?.classList.remove('cc-hidden');
+			this.sessionGroup?.classList.remove('cc-usageGroup--single');
+			this.weeklyUsageSpan.classList.remove('cc-hidden');
+			this.weeklyBar.classList.remove('cc-hidden');
 
 			if (hasWeekly) {
-				this.weeklyUsageSpan.classList.remove('cc-hidden');
-				this.weeklyBar.classList.remove('cc-hidden');
-
 				const rawPct = weekly.utilization;
 				const pct = Math.round(rawPct * 10) / 10;
 				this.weeklyResetMs = weekly.resets_at ? Date.parse(weekly.resets_at) : null;
@@ -500,11 +595,11 @@
 				this.weeklyBarFill.classList.toggle('cc-warn', width >= 90);
 				this.weeklyBarFill.classList.toggle('cc-full', width >= 99.5);
 			} else {
-				this.weeklyUsageSpan.classList.add('cc-hidden');
-				this.weeklyBar.classList.add('cc-hidden');
+				this.weeklyUsageSpan.textContent = 'Weekly: 0%';
+				this.weeklyBarFill.style.width = '0%';
+				this.weeklyBarFill.classList.remove('cc-warn', 'cc-full');
 				this.weeklyResetMs = null;
 				this.weeklyWindowStartMs = null;
-				this.weeklyBarFill.classList.remove('cc-warn', 'cc-full');
 			}
 
 			this._updateMarkers();
