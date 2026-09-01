@@ -33,13 +33,13 @@ The v2.0.0 redesign work loaded but the usage/token data never appeared. Three b
 
 **Chrome / Edge / Chromium**
 
-1. Download `claude-counter-2.0.0.zip` from [Releases](../../releases/tag/v2.0.0)
+1. Download `claude-counter-2.0.1.zip` from [Releases](../../releases/tag/v2.0.1)
 2. Go to `chrome://extensions` and enable **Developer mode**
 3. Drag and drop the zip onto the page
 
 **Firefox**
 
-1. Download `claude-counter-2.0.0.xpi` from [Releases](../../releases/tag/v2.0.0)
+1. Download `claude-counter-2.0.1.xpi` from [Releases](../../releases/tag/v2.0.1)
 2. Drag it into any Firefox window and click **Add**
 
 ## How it works
