@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Counter
 // @namespace    https://github.com/she-llac/claude-counter
-// @version      0.4.2-userscript
+// @version      2.0.1-userscript
 // @description  Shows token count, cache timer, and usage bars on claude.ai.
 // @match        https://claude.ai/*
 // @run-at       document-start
@@ -148,9 +148,37 @@
 
 	CC.DOM = Object.freeze({
 		CHAT_MENU_TRIGGER: '[data-testid="chat-menu-trigger"]',
+		CHAT_HEADER_ANCHOR: '[data-testid="chat-title-split"], [data-testid="chat-menu-trigger"]',
 		MODEL_SELECTOR_DROPDOWN: '[data-testid="model-selector-dropdown"]',
+		COMPOSER: '[data-cds="ChatComposer"]',
 		CHAT_PROJECT_WRAPPER: '.chat-project-wrapper',
 		BRIDGE_SCRIPT_ID: 'cc-bridge-script'
+	});
+
+	// Userscript stand-in for chrome.storage.local (same origin as claude.ai).
+	CC.storage = Object.freeze({
+		get(key) {
+			try {
+				const raw = localStorage.getItem(key);
+				return raw ? JSON.parse(raw) : null;
+			} catch {
+				return null;
+			}
+		},
+		set(key, value) {
+			try {
+				localStorage.setItem(key, JSON.stringify(value));
+			} catch {
+				// ignore quota / private-mode failures
+			}
+		},
+		remove(key) {
+			try {
+				localStorage.removeItem(key);
+			} catch {
+				// ignore
+			}
+		}
 	});
 
 	CC.CONST = Object.freeze({
@@ -514,6 +542,10 @@
 			this.weeklyWindowStartMs = null;
 			this.refreshingUsage = false;
 
+			this.sessionTooltip = null;
+			this.sessionHistory = [];
+			this.sessionResetKey = null;
+
 			this.domObserver = null;
 		}
 
@@ -596,7 +628,7 @@
 
 				if (headerMissing && !headerReattachPending) {
 					headerReattachPending = true;
-					CC.waitForElement(CC.DOM.CHAT_MENU_TRIGGER, 60000).then((el) => {
+					CC.waitForElement(CC.DOM.CHAT_HEADER_ANCHOR, 60000).then((el) => {
 						headerReattachPending = false;
 						if (el) this.attachHeader();
 					});
@@ -608,10 +640,11 @@
 		_initUsageLine() {
 			this.usageLine = document.createElement('div');
 			this.usageLine.className =
-				'text-text-400 text-[11px] cc-usageRow cc-hidden flex flex-row items-center gap-3 w-full';
+				'text-text-400 text-[11px] cc-usageRow flex flex-row items-center gap-3 w-full';
 
 			this.sessionUsageSpan = document.createElement('span');
 			this.sessionUsageSpan.className = 'cc-usageText';
+			this.sessionUsageSpan.textContent = 'Session: 0%';
 
 			this.sessionBar = document.createElement('div');
 			this.sessionBar.className = 'cc-bar cc-bar--usage';
@@ -625,6 +658,7 @@
 
 			this.weeklyUsageSpan = document.createElement('span');
 			this.weeklyUsageSpan.className = 'cc-usageText';
+			this.weeklyUsageSpan.textContent = 'Weekly: 0%';
 
 			this.weeklyBar = document.createElement('div');
 			this.weeklyBar.className = 'cc-bar cc-bar--usage';
@@ -680,9 +714,12 @@
 				{ topOffset: 8 }
 			);
 
+			this.sessionTooltip = makeTooltip(
+				"5-hour session window.\nThe bar shows your usage.\nThe line marks where you are in the window."
+			);
 			setupTooltip(
 				this.sessionGroup,
-				makeTooltip("5-hour session window.\nThe bar shows your usage.\nThe line marks where you are in the window."),
+				this.sessionTooltip,
 				{ topOffset: 8 }
 			);
 
@@ -700,9 +737,13 @@
 		}
 
 		attachHeader() {
-			const chatMenu = document.querySelector(CC.DOM.CHAT_MENU_TRIGGER);
-			if (!chatMenu) return;
-			const anchor = chatMenu.closest(CC.DOM.CHAT_PROJECT_WRAPPER) || chatMenu.parentElement;
+			const trigger = document.querySelector(CC.DOM.CHAT_HEADER_ANCHOR);
+			if (!trigger) return;
+			// New dframe header anchors on chat-title-split; legacy header on chat-menu-trigger
+			const anchor =
+				trigger.getAttribute('data-testid') === 'chat-title-split'
+					? trigger
+					: trigger.closest(CC.DOM.CHAT_PROJECT_WRAPPER) || trigger.parentElement;
 			if (!anchor) return;
 			if (anchor.nextElementSibling !== this.headerContainer) {
 				anchor.after(this.headerContainer);
@@ -715,6 +756,21 @@
 			if (!this.usageLine) return;
 			const modelSelector = document.querySelector(CC.DOM.MODEL_SELECTOR_DROPDOWN);
 			if (!modelSelector) return;
+
+			// New composer: render the row inside the rounded composer box itself
+			// (its first child), not the page-bg chin strip below it
+			const composer =
+				modelSelector.closest(CC.DOM.COMPOSER) ||
+				document.querySelector(CC.DOM.COMPOSER);
+			if (composer) {
+				const box = composer.querySelector(':scope > .bg-surface-3') || composer.firstElementChild;
+				if (box && box.lastElementChild !== this.usageLine) {
+					box.appendChild(this.usageLine);
+				}
+				this.refreshProgressChrome();
+				return;
+			}
+
 			const gridContainer = modelSelector.closest('[data-testid="chat-input-grid-container"]');
 			const gridArea = modelSelector.closest('[data-testid="chat-input-grid-area"]');
 			const findToolbarRow = (el, stopAt) => {
@@ -841,13 +897,66 @@
 			this.headerContainer.appendChild(this.headerDisplay);
 		}
 
+		_updateSessionTooltip() {
+			if (!this.sessionTooltip) return;
+			const baseText = "5-hour session window.\nThe bar shows your usage.\nThe line marks where you are in the window.";
+			if (this.sessionHistory && this.sessionHistory.length > 0) {
+				const historyLine = this.sessionHistory
+					.map((v) => (v === 0 ? '0' : `${v}%`))
+					.join(' -> ');
+				this.sessionTooltip.textContent = `${historyLine}\n${baseText}`;
+			} else {
+				this.sessionTooltip.textContent = baseText;
+			}
+		}
+
+		_updateSessionHistory(resetsAt, currentPct) {
+			if (!resetsAt) {
+				this.sessionHistory = [];
+				this.sessionResetKey = null;
+				this._updateSessionTooltip();
+				return;
+			}
+
+			// New window: pick up whatever the last page load stored for it
+			let storedResetsAt = this.sessionResetKey;
+			let storedHistory = this.sessionHistory;
+			if (this.sessionResetKey !== resetsAt) {
+				const data = CC.storage.get('claude_session_history');
+				storedResetsAt = data?.resets_at ?? null;
+				storedHistory = data?.history ?? null;
+			}
+
+			let history;
+			if (storedResetsAt === resetsAt && Array.isArray(storedHistory) && storedHistory.length > 0) {
+				history = [...storedHistory];
+			} else {
+				history = currentPct > 0 ? [0, currentPct] : [0];
+			}
+
+			const lastVal = history[history.length - 1];
+			if (currentPct > lastVal) {
+				history.push(currentPct);
+				if (history.length > 5) {
+					history = history.slice(-5);
+				}
+			} else if (currentPct < lastVal) {
+				history = currentPct > 0 ? [0, currentPct] : [0];
+			}
+
+			this.sessionHistory = history;
+			this.sessionResetKey = resetsAt;
+			this._updateSessionTooltip();
+			CC.storage.set('claude_session_history', { resets_at: resetsAt, history });
+		}
+
 		setUsage(usage) {
 			this.refreshProgressChrome();
 			const session = usage?.five_hour || null;
 			const weekly = usage?.seven_day || null;
-			const hasAnyUsage =
-				!!(session && typeof session.utilization === 'number') || !!(weekly && typeof weekly.utilization === 'number');
-			this.usageLine?.classList.toggle('cc-hidden', !hasAnyUsage);
+
+			// Bars are permanent; unknown/expired usage renders as 0%
+			this.usageLine?.classList.remove('cc-hidden');
 
 			if (session && typeof session.utilization === 'number') {
 				const rawPct = session.utilization;
@@ -861,22 +970,24 @@
 				this.sessionBarFill.style.width = `${width}%`;
 				this.sessionBarFill.classList.toggle('cc-warn', width >= 90);
 				this.sessionBarFill.classList.toggle('cc-full', width >= 99.5);
+
+				this._updateSessionHistory(session.resets_at, pct);
 			} else {
-				this.sessionUsageSpan.textContent = '';
+				this.sessionUsageSpan.textContent = 'Session: 0%';
 				this.sessionBarFill.style.width = '0%';
 				this.sessionBarFill.classList.remove('cc-warn', 'cc-full');
 				this.sessionResetMs = null;
 				this.sessionWindowStartMs = null;
+				this._updateSessionHistory(null, 0);
 			}
 
 			const hasWeekly = weekly && typeof weekly.utilization === 'number';
-			this.weeklyGroup?.classList.toggle('cc-hidden', !hasWeekly);
-			this.sessionGroup?.classList.toggle('cc-usageGroup--single', !hasWeekly);
+			this.weeklyGroup?.classList.remove('cc-hidden');
+			this.sessionGroup?.classList.remove('cc-usageGroup--single');
+			this.weeklyUsageSpan.classList.remove('cc-hidden');
+			this.weeklyBar.classList.remove('cc-hidden');
 
 			if (hasWeekly) {
-				this.weeklyUsageSpan.classList.remove('cc-hidden');
-				this.weeklyBar.classList.remove('cc-hidden');
-
 				const rawPct = weekly.utilization;
 				const pct = Math.round(rawPct * 10) / 10;
 				this.weeklyResetMs = weekly.resets_at ? Date.parse(weekly.resets_at) : null;
@@ -889,11 +1000,11 @@
 				this.weeklyBarFill.classList.toggle('cc-warn', width >= 90);
 				this.weeklyBarFill.classList.toggle('cc-full', width >= 99.5);
 			} else {
-				this.weeklyUsageSpan.classList.add('cc-hidden');
-				this.weeklyBar.classList.add('cc-hidden');
+				this.weeklyUsageSpan.textContent = 'Weekly: 0%';
+				this.weeklyBarFill.style.width = '0%';
+				this.weeklyBarFill.classList.remove('cc-warn', 'cc-full');
 				this.weeklyResetMs = null;
 				this.weeklyWindowStartMs = null;
-				this.weeklyBarFill.classList.remove('cc-warn', 'cc-full');
 			}
 
 			this._updateMarkers();
@@ -1093,11 +1204,31 @@
 		if (!normalized) return;
 		const now = Date.now();
 		usageState = normalized;
+		persistUsage(normalized, currentOrgId || getOrgIdFromCookie());
 		lastUsageUpdateMs = now;
 		if (source === 'sse') lastUsageSseMs = now;
 		usageResetMs.five_hour = normalized.five_hour?.resets_at ? Date.parse(normalized.five_hour.resets_at) : null;
 		usageResetMs.seven_day = normalized.seven_day?.resets_at ? Date.parse(normalized.seven_day.resets_at) : null;
 		ui.setUsage(normalized);
+	}
+
+	// Persist last usage snapshot so bars survive reloads (the /usage endpoint
+	// returns null windows on free plan until the next message streams message_limit).
+	function persistUsage(normalized, orgId) {
+		CC.storage.set('claude_usage_state', { orgId, usage: normalized });
+	}
+
+	function restoreCachedUsage() {
+		const entry = CC.storage.get('claude_usage_state');
+		const cached = entry?.usage;
+		if (cached && entry.orgId === getOrgIdFromCookie() && (cached.five_hour || cached.seven_day)) {
+			return cached;
+		}
+		return null;
+	}
+
+	function clearPersistedUsage() {
+		CC.storage.remove('claude_usage_state');
 	}
 
 	function updateOrgIdIfNeeded(newOrgId) {
@@ -1143,6 +1274,24 @@
 		}
 
 		const parsed = parseUsageFromUsageEndpoint(raw);
+
+		// Endpoint reachable but reports no windows. Only clear when nothing is
+		// live (free plan returns nulls even mid-window while SSE data is fresh).
+		if (raw && typeof raw === 'object' && !parsed) {
+			const nowMs = Date.now();
+			const hasLiveWindow =
+				(usageResetMs.five_hour && nowMs < usageResetMs.five_hour) ||
+				(usageResetMs.seven_day && nowMs < usageResetMs.seven_day);
+			if (!hasLiveWindow) {
+				usageState = null;
+				usageResetMs.five_hour = null;
+				usageResetMs.seven_day = null;
+				clearPersistedUsage();
+				ui.setUsage({});
+			}
+			return;
+		}
+
 		applyUsageUpdate(parsed, 'usage');
 	}
 
@@ -1186,23 +1335,29 @@
 	async function handleUrlChange() {
 		currentConversationId = getConversationId();
 
+		// Attach usage line and header independently - they have different anchor
+		// elements and the header anchor doesn't exist on home/new pages
 		waitForElement(CC.DOM.MODEL_SELECTOR_DROPDOWN, 60000).then((el) => {
 			if (el) ui.attachUsageLine();
 		});
-		waitForElement(CC.DOM.CHAT_MENU_TRIGGER, 60000).then((el) => {
+		waitForElement(CC.DOM.CHAT_HEADER_ANCHOR, 60000).then((el) => {
 			if (el) ui.attachHeader();
 		});
+
+		// Usage is org-level: restore/refresh on every page, including home/new
+		updateOrgIdIfNeeded(getOrgIdFromCookie());
+		if (!usageState) {
+			const cached = restoreCachedUsage();
+			if (cached) applyUsageUpdate(cached, 'cache');
+			else await refreshUsage();
+		}
 
 		if (!currentConversationId) {
 			ui.setConversationMetrics();
 			return;
 		}
 
-		updateOrgIdIfNeeded(getOrgIdFromCookie());
-
 		await refreshConversation();
-
-		if (!usageState) await refreshUsage();
 	}
 
 	function tick() {
