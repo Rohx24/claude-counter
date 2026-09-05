@@ -45,7 +45,9 @@ The v2.0.0 redesign work loaded but the usage/token data never appeared. Three b
 
 **Firefox**
 
-1. Download `claude-counter-2.0.2.xpi` (Mozilla-signed) from [Releases](../../releases/tag/v2.0.2)
+> Mozilla signing is in progress. Until the signed build is posted here, the `.xpi` installs only on Firefox Developer Edition / Nightly, or temporarily via `about:debugging`. The signed version will replace it once available.
+
+1. Download `claude-counter-2.0.2.xpi` from [Releases](../../releases/tag/v2.0.2)
 2. Drag it into any Firefox window and click **Add**
 
 ## How it works
