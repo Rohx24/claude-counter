@@ -11,9 +11,13 @@
 
 	function formatResetCountdown(timestampMs) {
 		const diffMs = timestampMs - Date.now();
-		if (diffMs <= 0) return '0m';
+		if (diffMs <= 0) return '0s';
 
-		const totalMinutes = Math.round(diffMs / (1000 * 60));
+		// < 1 min: show seconds (restored for parity with the userscript build)
+		const totalSeconds = Math.floor(diffMs / 1000);
+		if (totalSeconds < 60) return `${totalSeconds}s`;
+
+		const totalMinutes = Math.round(totalSeconds / 60);
 		if (totalMinutes < 60) return `${totalMinutes}m`;
 
 		const hours = Math.floor(totalMinutes / 60);

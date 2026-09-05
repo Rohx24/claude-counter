@@ -29,17 +29,23 @@ The v2.0.0 redesign work loaded but the usage/token data never appeared. Three b
 - **Guarded the `chrome.storage.sync` call** in `main.js` so a missing permission degrades gracefully instead of crashing `handleUrlChange()`
 - **Corrected the injected bridge path** in `bridge-client.js` (`claude-counter/bridge.js` → `src/injected/bridge.js`) — the mismatch 404'd the bridge, so every usage/conversation fetch silently timed out and the bars stuck at 0%
 
+## v2.0.2
+
+- Reset countdown now shows a live seconds tick in the final minute (`57s` → `0s`) instead of jumping to `0m`
+- Restored the original she-llac icon set
+- Fixed release packaging so `manifest.json` sits at the archive root (the earlier `.zip`/`.xpi` nested it in a subfolder, which broke the Firefox install)
+
 ## Installation
 
 **Chrome / Edge / Chromium**
 
-1. Download `claude-counter-2.0.1.zip` from [Releases](../../releases/tag/v2.0.1)
+1. Download `claude-counter-2.0.2.zip` from [Releases](../../releases/tag/v2.0.2)
 2. Go to `chrome://extensions` and enable **Developer mode**
 3. Drag and drop the zip onto the page
 
 **Firefox**
 
-1. Download `claude-counter-2.0.1.xpi` from [Releases](../../releases/tag/v2.0.1)
+1. Download `claude-counter-2.0.2.xpi` from [Releases](../../releases/tag/v2.0.2)
 2. Drag it into any Firefox window and click **Add**
 
 ## How it works
